@@ -6,6 +6,27 @@ import discord
 from discord.ext import commands
 import dateparser
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import http.server
+import socketserver
+import threading
+
+# --- Renderのポート要件を満たすための簡易Webサーバー ---
+PORT = int(os.environ.get("PORT", 10000))
+
+class SimpleHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Discord Bot is alive!")
+
+def run_web_server():
+    with socketserver.TCPServer(("", PORT), SimpleHandler) as httpd:
+        print(f"Web server started on port {PORT}")
+        httpd.serve_forever()
+
+# 別スレッドでWebサーバーを起動
+threading.Thread(target=run_web_server, daemon=True).start()
+# --------------------------------------------------
 
 # Intentsの設定
 intents = discord.Intents.default()
@@ -78,7 +99,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# Botの起動（環境変数から確実にトークンを取得する）
+# Botの起動
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:

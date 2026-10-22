@@ -6,6 +6,8 @@ import discord
 from discord.ext import commands
 import dateparser
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.base import ConflictingIdError
+import pytz  # 追加：タイムゾーン管理用
 import http.server
 import socketserver
 import threading
@@ -29,12 +31,14 @@ threading.Thread(target=run_web_server, daemon=True).start()
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-scheduler = AsyncIOScheduler()
+# 日本時間（JST）を指定してスケジューラーを初期化
+jst = pytz.timezone('Asia/Tokyo')
+scheduler = AsyncIOScheduler(timezone=jst)
 
 @bot.event
 async def on_ready():
     scheduler.start()
-    print(f"=== ログイン成功: {bot.user.name} ===")
+    print(f"=== ログイン成功: {bot.user.name} (タイムゾーン: JST) ===")
 
 @bot.event
 async def on_message(message):
@@ -50,20 +54,20 @@ async def on_message(message):
     urls = re.findall(url_pattern, content)
 
     if not urls:
-        print(" -> URLなしのためスキップ")
         await bot.process_commands(message)
         return
 
     target_url = urls[0]
 
-    # URLを除外したテキストから日時を解析
-    text_without_url = content.replace(target_url, "")
-    parsed_date = dateparser.parse(text_without_url, languages=['ja'])
+    # URLを除外したテキストから日時を解析（日本時間を基準に設定）
+    settings = {'TIMEZONE': 'Asia/Tokyo', 'RETURN_AS_TIMEZONE_AWARE': True}
+    parsed_date = dateparser.parse(text=content.replace(target_url, ""), languages=['ja'], settings=settings)
 
-    print(f" -> 解析された日時: {parsed_date}")
+    print(f" -> 解析された日時 (JST): {parsed_date}")
 
     if parsed_date:
-        if parsed_date <= datetime.datetime.now():
+        now = datetime.datetime.now(jst)
+        if parsed_date <= now:
             print(" -> 過去の日時のためスキップ")
             await message.channel.send("⚠️ 指定された日時が過去（または現在より前）です。未来の日時を指定してください。")
             await bot.process_commands(message)
@@ -72,9 +76,8 @@ async def on_message(message):
         # 5分前を計算
         remind_time = parsed_date - datetime.timedelta(minutes=5)
         
-        # もし設定時間が近すぎてすでに5分前を過ぎている場合の保険
-        if remind_time < datetime.datetime.now():
-            remind_time = datetime.datetime.now() + datetime.timedelta(seconds=10)
+        if remind_time < now:
+            remind_time = now + datetime.timedelta(seconds=10)
 
         channel_id = message.channel.id
         

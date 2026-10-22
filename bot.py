@@ -28,9 +28,8 @@ def run_web_server():
 threading.Thread(target=run_web_server, daemon=True).start()
 # --------------------------------------------------
 
-# Intentsの設定
-intents = discord.Intents.default()
-intents.message_content = True
+# Intentsの設定（すべてのインテントを有効化）
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # スケジューラーの初期化
@@ -47,6 +46,9 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # デバッグログ：メッセージを受信したら必ず出力
+    print(f"[RECEIVED MESSAGE]: {message.content}")
+
     content = message.content
 
     # URLを抽出
@@ -54,21 +56,22 @@ async def on_message(message):
     urls = re.findall(url_pattern, content)
 
     if not urls:
+        print(" -> URLが見つかりませんでした")
         await bot.process_commands(message)
         return
 
-    target_url = urls[0] # 最初に見つかったURLを対象とする
+    target_url = urls[0]
 
-    # URLを除外したテキストから日時を推測する
+    # URLを除外したテキストから日時を解析
     text_without_url = content.replace(target_url, "")
     parsed_date = dateparser.parse(text_without_url, languages=['ja'])
 
+    print(f" -> 解析された日時: {parsed_date}")
+
     if parsed_date:
-        # 過去の日時でなければスケジュール登録
-        now = datetime.datetime.now(parsed_date.tzinfo) if parsed_date.tzinfo else datetime.datetime.now()
-        
         # 過去指定の場合はスキップ
         if parsed_date <= datetime.datetime.now():
+            print(" -> 過去の日時のためスキップされました")
             await bot.process_commands(message)
             return
 
@@ -95,7 +98,7 @@ async def on_message(message):
         
         # 登録完了のリアクション
         await message.add_reaction("✅")
-        print(f"Scheduled reminder for {parsed_date} (Remind at {remind_time})")
+        print(f" -> リマインダー登録成功! (実行予定: {remind_time})")
 
     await bot.process_commands(message)
 

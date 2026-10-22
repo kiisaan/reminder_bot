@@ -1,122 +1,87 @@
-import datetime
 import os
 import re
-import sqlite3
+import datetime
+import asyncio
 import discord
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from discord.ext import commands
 import dateparser
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# 環境変数からDiscordのトークンを取得
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-
+# Intentsの設定
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# スケジューラーの初期化
 scheduler = AsyncIOScheduler()
 
-# データベースの初期化（再起動しても予定が消えないようにする）
-DB_FILE = "reminders.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id INTEGER,
-            remind_time TEXT,
-            url TEXT,
-            content TEXT,
-            sent INTEGER DEFAULT 0
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-@client.event
+@bot.event
 async def on_ready():
-    print(f"Logged in as {client.user}")
-    # 登録済みの未送信リマインドを再スケジュール
-    reschedule_existing_reminders()
     scheduler.start()
+    print(f"Logged in as {bot.user.name}")
 
-@client.event
+# メッセージ監視
+@bot.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author.bot:
         return
 
     content = message.content
 
-    # メッセージからURLを抽出
-    url_match = re.search(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", content)
-    if not url_match:
+    # URLを抽出
+    url_pattern = r'https?://[\w/:%#\$&\?\(\)~\.=\+\-]+'
+    urls = re.findall(url_pattern, content)
+
+    if not urls:
+        await bot.process_commands(message)
         return
-    url = url_match.group(0)
 
-    # URL部分を除いたテキストを日付解析用にする
-    text_for_date = content.replace(url, "").strip()
-    
-    # 日時を解析（例: "10月25日 15:00" や "明日 13:00" など）
-    parsed_date = dateparser.parse(text_for_date, settings={'PREFER_DATES_FROM': 'future'})
-    
+    target_url = urls[0] # 最初に見つかったURLを対象とする
+
+    # URLを除外したテキストから日時を推測する
+    text_without_url = content.replace(target_url, "")
+    parsed_date = dateparser.parse(text_without_url, languages=['ja'])
+
     if parsed_date:
-        # イベント時間の5分前を計算
+        # 過去の日時でなければスケジュール登録
+        now = datetime.datetime.now(parsed_date.tzinfo) if parsed_date.tzinfo else datetime.datetime.now()
+        
+        # 過去指定の場合はスキップ
+        if parsed_date <= datetime.datetime.now():
+            await bot.process_commands(message)
+            return
+
+        # 5分前を計算
         remind_time = parsed_date - datetime.timedelta(minutes=5)
-        now = datetime.datetime.now()
+        
+        if remind_time < datetime.datetime.now():
+            remind_time = datetime.datetime.now() + datetime.timedelta(seconds=10)
 
-        if remind_time > now:
-            # データベースに保存
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO reminders (channel_id, remind_time, url, content) VALUES (?, ?, ?, ?)",
-                (message.channel.id, remind_time.isoformat(), url, content)
-            )
-            conn.commit()
-            reminder_id = cursor.lastrowid
-            conn.close()
+        channel_id = message.channel.id
+        
+        # リマインドタスクの関数
+        async def send_reminder():
+            target_channel = bot.get_channel(channel_id)
+            if target_channel:
+                await target_channel.send(
+                    f"⏰ **リマインダー通知**\n"
+                    f"まもなく予定の時間です（5分前）！\n"
+                    f"🔗 対象URL: {target_url}"
+                )
 
-            # スケジューラーに登録
-            scheduler.add_job(
-                send_reminder,
-                'date',
-                run_date=remind_time,
-                args=[reminder_id, message.channel.id, url, parsed_date.strftime('%Y-%m-%d %H:%M')]
-            )
+        # スケジューラーに登録
+        scheduler.add_job(send_reminder, 'date', run_date=remind_time)
+        
+        # 登録完了のリアクション
+        await message.add_reaction("✅")
+        print(f"Scheduled reminder for {parsed_date} (Remind at {remind_time})")
 
-            await message.channel.reply(f"✅ リマインダーを登録しました！（{parsed_date.strftime('%Y-%m-%d %H:%M')}の5分前に通知します）")
+    await bot.process_commands(message)
 
-async def send_reminder(reminder_id, channel_id, url, event_time_str):
-    channel = client.get_channel(channel_id)
-    if channel:
-        await channel.send(f"⏰ **まもなくイベントの時間です！**（予定時刻: {event_time_str}）\n{url}")
-    
-    # 送信済みフラグを更新
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (reminder_id,))
-    conn.commit()
-    conn.close()
+# Botの起動（環境変数から確実にトークンを取得する）
+TOKEN = os.getenv("DISCORD_TOKEN")
 
-def reschedule_existing_reminders():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, channel_id, remind_time, url, content FROM reminders WHERE sent = 0")
-    rows = cursor.fetchall()
-    conn.close()
-
-    now = datetime.datetime.now()
-    for row in rows:
-        r_id, channel_id, r_time_str, url, content = row
-        r_time = datetime.datetime.fromisoformat(r_time_str)
-        if r_time > now:
-            scheduler.add_job(
-                send_reminder,
-                'date',
-                run_date=r_time,
-                args=[r_id, channel_id, url, r_time.strftime('%Y-%m-%d %H:%M')]
-            )
-
-client.run(TOKEN)
+if not TOKEN:
+    print("Error: DISCORD_TOKEN environment variable is not set or empty.")
+else:
+    bot.run(TOKEN)
